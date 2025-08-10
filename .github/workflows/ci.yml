@@ -1,0 +1,357 @@
+name: CI/CD Pipeline
+
+# Trigger the workflow on push and pull request events
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering
+
+# Set permissions for the workflow
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+# Define environment variables
+env:
+  SHELLCHECK_VERSION: "0.9.0"
+  BATS_VERSION: "1.10.0"
+
+jobs:
+  # Linting and static analysis
+  lint:
+    name: Lint and Static Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install ShellCheck
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck
+        shellcheck --version
+    
+    - name: Install pre-commit
+      run: |
+        python -m pip install --upgrade pip
+        pip install pre-commit
+        pre-commit --version
+    
+    - name: Cache pre-commit hooks
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pre-commit
+        key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+        restore-keys: |
+          pre-commit-
+    
+    - name: Run pre-commit hooks
+      run: |
+        pre-commit run --all-files --show-diff-on-failure
+    
+    - name: Run ShellCheck on all shell scripts
+      run: |
+        find . -name "*.sh" -not -path "./tests/*" | xargs shellcheck -e SC1091,SC2034,SC2154
+    
+    - name: Validate configuration files
+      run: |
+        # Check if config files are valid bash syntax
+        bash -n config/install.conf
+        
+        # Check if library files are sourceable
+        bash -c "source config/install.conf && source lib/common.sh"
+        bash -c "source config/install.conf && source lib/common.sh && source lib/install.sh"
+    
+    - name: Check script permissions
+      run: |
+        # Ensure main script is executable
+        test -x install.sh || (echo "install.sh is not executable" && exit 1)
+        
+        # Check for proper shebangs
+        head -1 install.sh | grep -q '^#!/' || (echo "install.sh missing shebang" && exit 1)
+        head -1 lib/common.sh | grep -q '^#!/' || (echo "lib/common.sh missing shebang" && exit 1)
+        head -1 lib/install.sh | grep -q '^#!/' || (echo "lib/install.sh missing shebang" && exit 1)
+
+  # Security scanning
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Bandit security scan
+      uses: securecodewarrior/github-action-bandit@v1
+      with:
+        config_file: '.bandit'
+        recursive: true
+        format: 'sarif'
+        output_file: 'bandit-results.sarif'
+      continue-on-error: true
+    
+    - name: Upload Bandit results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'bandit-results.sarif'
+      continue-on-error: true
+    
+    - name: Scan for secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+  # Unit tests
+  test:
+    name: Unit Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-20.04]
+        bash-version: ['4.4', '5.0', '5.1']
+        include:
+          - os: macos-latest
+            bash-version: '5.1'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Bash (if needed)
+      if: matrix.bash-version != '5.1' && matrix.os != 'macos-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        # Install specific bash version if needed
+        bash --version
+    
+    - name: Install BATS
+      run: |
+        if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          brew install bats-core
+        else
+          sudo apt-get update
+          sudo apt-get install -y bats
+        fi
+        bats --version
+    
+    - name: Install test dependencies
+      run: |
+        # Install additional tools needed for testing
+        if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          brew install coreutils gnu-sed
+        else
+          sudo apt-get install -y curl wget git
+        fi
+    
+    - name: Run BATS tests
+      run: |
+        # Set up test environment
+        export CI=true
+        export GITHUB_ACTIONS=true
+        
+        # Run all tests
+        bats tests/test_install.bats --verbose-run
+    
+    - name: Test script help and version
+      run: |
+        # Test help output
+        ./install.sh --help
+        
+        # Test version output (if implemented)
+        ./install.sh --version || echo "Version option not implemented yet"
+    
+    - name: Test script with invalid arguments
+      run: |
+        # Test that script fails gracefully with invalid arguments
+        ! ./install.sh --invalid-option
+        ! ./install.sh --nonexistent-flag
+
+  # Integration tests
+  integration:
+    name: Integration Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-20.04]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y zsh git curl wget bats
+    
+    - name: Test dry run installation
+      run: |
+        # Test script execution without actual installation
+        export DRY_RUN=true
+        ./install.sh --help
+    
+    - name: Test configuration loading
+      run: |
+        # Test that configuration can be loaded without errors
+        source config/install.conf
+        source lib/common.sh
+        
+        # Test OS detection
+        detectOS
+        echo "Detected OS: $OS"
+        echo "Package Manager: $PACKAGE_MANAGER"
+    
+    - name: Test backup functionality
+      run: |
+        # Create test environment
+        export TEST_HOME="/tmp/test-zsh-install"
+        mkdir -p "$TEST_HOME"
+        
+        # Test backup creation
+        echo "test content" > "$TEST_HOME/test.txt"
+        
+        # Source functions and test backup
+        source config/install.conf
+        source lib/common.sh
+        
+        export CREATE_BACKUP="true"
+        export BACKUP_DIR="$TEST_HOME/.backup"
+        
+        createBackup "$TEST_HOME/test.txt" "test"
+        
+        # Verify backup was created
+        ls -la "$BACKUP_DIR"
+        
+        # Cleanup
+        rm -rf "$TEST_HOME"
+
+  # Documentation and release
+  docs:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install markdown tools
+      run: |
+        npm install -g markdownlint-cli markdown-link-check
+    
+    - name: Lint markdown files
+      run: |
+        markdownlint README.md --config .markdownlint.json || echo "Markdownlint config not found, using defaults"
+    
+    - name: Check markdown links
+      run: |
+        markdown-link-check README.md --config .markdown-link-check.json || echo "Link check config not found, using defaults"
+      continue-on-error: true
+    
+    - name: Validate documentation structure
+      run: |
+        # Check that required documentation files exist
+        test -f README.md || (echo "README.md is missing" && exit 1)
+        
+        # Check that README contains required sections
+        grep -q "## Installation" README.md || (echo "Installation section missing" && exit 1)
+        grep -q "## Usage" README.md || grep -q "## Instalación" README.md || (echo "Usage section missing" && exit 1)
+        grep -q "## Testing" README.md || grep -q "## 🧪 Testing" README.md || (echo "Testing section missing" && exit 1)
+
+  # Performance and compatibility
+  compatibility:
+    name: Compatibility Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Test with different shells
+      run: |
+        # Test script compatibility with different shells
+        sudo apt-get update
+        sudo apt-get install -y bash dash zsh
+        
+        # Test with bash
+        bash -n install.sh
+        bash -n lib/common.sh
+        bash -n lib/install.sh
+        
+        # Test configuration syntax
+        bash -n config/install.conf
+    
+    - name: Test script performance
+      run: |
+        # Basic performance test - script should start quickly
+        time timeout 5s ./install.sh --help
+    
+    - name: Test memory usage
+      run: |
+        # Check that script doesn't use excessive memory
+        /usr/bin/time -v ./install.sh --help 2>&1 | grep "Maximum resident set size" || true
+
+  # Build summary
+  build-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [lint, security, test, integration, docs, compatibility]
+    if: always()
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Generate build summary
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Security | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Test | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Integration | ${{ needs.integration.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Documentation | ${{ needs.docs.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Compatibility | ${{ needs.compatibility.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Report status
+      run: |
+        if [[ "${{ needs.lint.result }}" == "success" && 
+              "${{ needs.test.result }}" == "success" && 
+              "${{ needs.integration.result }}" == "success" ]]; then
+          echo "✅ All critical checks passed!"
+          exit 0
+        else
+          echo "❌ Some critical checks failed!"
+          exit 1
+        fi

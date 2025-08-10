@@ -1,0 +1,52 @@
+# ShellCheck configuration file
+# This file configures ShellCheck for the ZSH Terminal Installation project
+
+# Disable specific warnings that are not applicable to our use case
+
+# SC1091: Not following sourced files
+# We source files that may not exist during static analysis
+disable=SC1091
+
+# SC2034: Variable appears unused
+# Some variables are used in sourced files or exported for subshells
+disable=SC2034
+
+# SC2154: Variable is referenced but not assigned
+# Variables may be assigned in sourced configuration files
+disable=SC2154
+
+# SC2164: Use 'cd ... || exit' or 'cd ... || return' in case cd fails
+# We handle cd failures explicitly in our error handling
+disable=SC2164
+
+# SC1090: Can't follow non-constant source
+# Dynamic sourcing is intentional in our modular design
+disable=SC1090
+
+# Enable additional checks
+
+# Check for POSIX compliance where possible
+# shell=bash
+
+# Set external sources that should be considered available
+# external-sources=true
+
+# Severity level (error, warning, info, style)
+# severity=warning
+
+# Enable checking of sourced files
+check-sourced=true
+
+# Format for output (gcc, checkstyle, diff, json, json1, quiet, tty)
+# format=tty
+
+# Exclude specific files or patterns
+# exclude-dir=.git
+# exclude-dir=node_modules
+
+# Include additional directories for sourced files
+# source-path=lib
+# source-path=config
+
+# Enable wiki links in output
+wiki-link-count=3
